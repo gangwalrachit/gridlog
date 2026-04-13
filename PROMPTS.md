@@ -98,3 +98,46 @@ any code, so every design choice is defensible in an interview.
    To be discussed before implementation begins.
 
 ---
+
+## Prompt 3 — Phase 2 Architecture + Docker Compose
+
+**Date:** 12 April 2026
+**Tool:** Claude Code
+
+**Prompt:** User approved Phase 1 architecture. Added dual-interface
+architecture (gRPC + FastAPI gateway), folder structure for all phases, and
+implemented Docker Compose as first Phase 1 deliverable.
+
+**What I wanted to achieve:** Get Postgres + ClickHouse running locally before
+touching any Python. Also ensure fresh clones can rebuild gRPC generated code.
+
+**Key decisions from this prompt:**
+
+1. **Docker Compose implemented** — Postgres 16 + ClickHouse 24.8, named
+   volumes, health checks, shared network (`gridlog-net`), env var defaults
+   so `docker compose up` works without `.env`.
+
+2. **ClickHouse passwordless for local dev** — `users.xml` override sets empty
+   password for `default` user with `access_management=1` (needed for
+   `td.create()` to create tables).
+
+3. **ClickHouse init script** — single `CREATE DATABASE IF NOT EXISTS gridlog`
+   in `docker-entrypoint-initdb.d/`. TimeDB creates tables, we create the DB.
+
+4. **`scripts/gen_proto.sh`** — one-command protobuf regeneration. Resolves
+   repo root from script location, creates `__init__.py` in generated dir.
+   Anyone cloning the repo can rebuild generated code.
+
+5. **`gridlog/grpc_service/generated/` gitignored** — standard practice,
+   rebuilt via `gen_proto.sh`.
+
+6. **Dual-interface architecture documented** — gRPC is the real service
+   (Phase 2), FastAPI narrows to thin HTTP→gRPC gateway. Both expose
+   `GetLatestPrices` + `GetPricesAsOf`. ASCII request-flow diagram in
+   ARCHITECTURE.md.
+
+7. **Folder structure locked for all phases** — `proto/`, `grpc_service/`,
+   `frontend/`, `fixtures/` all reserved now to avoid restructuring later.
+   `query/` is the shared heart — pure logic, no framework deps.
+
+---

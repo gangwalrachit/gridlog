@@ -1,0 +1,26 @@
+services:
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: gridlog-timescaledb
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-gridlog}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gridlog}
+      POSTGRES_DB: ${POSTGRES_DB:-gridlog}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - tsdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-gridlog}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - gridlog-net
+
+volumes:
+  tsdata:
+
+networks:
+  gridlog-net:
+    driver: bridge
