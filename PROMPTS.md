@@ -284,3 +284,86 @@ saved XML fixtures give us.
   always going to be a footnote; now it's a non-entity.
 
 ---
+
+## Prompt 6 — `gridlog/entsoe/` Module Design
+
+**Date:** 13 April 2026
+**Tool:** Claude Code
+
+**Prompt:** Flesh out the design of the `entsoe/` module before
+implementation — HTTP client shape, parser contract, time-window signature,
+and DataFrame output shape.
+
+**What I wanted to achieve:** Lock the design on paper so next session is a
+straight implementation pass with no open questions.
+
+**Key decisions from this prompt:**
+
+1. **Class `EntsoeClient`, not a module function.** Carries the `httpx.Client`
+   and token across calls (cleaner lifecycle when embedded in the FastAPI
+   lifespan in Phase 2), constructor-injected token keeps the method itself
+   free of hidden settings reads. Single public method:
+   `fetch_day_ahead(zone_eic, start, end) -> bytes`.
+
+2. **Sync `httpx.Client`.** Async is unnecessary for a periodic ingest loop.
+   Revisit only if Phase 2 actually needs concurrent fetches.
+
+3. **Time window signature: `(start: datetime, end: datetime)`.** Maps 1:1
+   to ENTSO-E's `periodStart` / `periodEnd` request params, supports multi-day
+   backfills in a single call, and stays stable when we eventually add
+   intraday 15-min resolution (same signature, different resolution in the
+   response). A `(day: date)` signature would have forced a rewrite for
+   every new use case.
+
+4. **Constants live in the client module.** `BASE_URL`,
+   `DOCUMENT_TYPE_DAY_AHEAD = "A44"`, `SE3_EIC = "10Y1001A1001A46L"`.
+   API-specific, not user-configurable — no reason to pollute
+   `gridlog/config.py`. When additional zones arrive, `SE3_EIC` graduates to
+   a dict of EIC codes keyed by zone name, still in the client module.
+
+5. **Parser is a pure function:** `parse_day_ahead(raw: bytes) -> pd.DataFrame`.
+   Pure function means it's trivially unit-testable against saved XML, with
+   no mocks, no fixtures-as-runtime nonsense.
+
+6. **Stdlib `xml.etree.ElementTree`, not `lxml`.** ENTSO-E documents are
+   well-formed and modest in size; stdlib handles them without the
+   compile-heavy native dependency. Zero downside.
+
+7. **DataFrame output is three columns: `knowledge_time`, `valid_time`,
+   `value`.** Both times tz-aware UTC (`datetime64[ns, UTC]`), value as
+   `float64`. This is the VERSIONED shape TimeDB expects on the insert path.
+   Batch metadata stays out of the row columns — it rides along via TimeDB's
+   insert kwargs (into `batches_table`), not as a payload column.
+
+8. **One `knowledge_time` per document, shared by every row.** Taken from
+   `<createdDateTime>` in the document header — this is the
+   publication-time semantics we want. Fallback to `datetime.now(UTC)` if
+   missing, logged INFO per the error taxonomy in ARCHITECTURE.md.
+
+9. **Empty document → empty DataFrame** (same 3 columns, zero rows). Ingest
+   pipeline logs WARN and moves on. No exception — an empty auction result
+   is a valid operational state, not an error.
+
+10. **YAGNI on fixtures.** Capture one real ENTSO-E response for SE3
+    day-ahead and write parser unit tests against it. Edge-case fixtures
+    (DST boundary, empty day, multi-TimeSeries doc) only when we hit a real
+    bug that needs them.
+
+**Deferred to the implementation session:**
+- Exact TimeDB insert call shape — will verify against `SeriesCollection.insert()`
+  when wiring `ingest/`
+- Whether the ingest pipeline passes `batch_params` through to TimeDB for the
+  audit trail in `batches_table`
+- Location of the fixture capture helper — likely `scripts/capture_fixture.py`,
+  single-shot, not part of the runtime package
+
+**Implementation order for next session:**
+1. `gridlog/entsoe/client.py` — `EntsoeClient` class
+2. `gridlog/entsoe/parser.py` — `parse_day_ahead` function
+3. `gridlog/entsoe/__init__.py` — re-exports
+4. `scripts/capture_fixture.py` — one-shot helper, run manually
+5. Capture one SE3 day-ahead fixture → `fixtures/se3_da_<date>.xml`
+6. `tests/unit/test_parser.py` — fixture-driven unit tests
+7. Round-trip smoke: client → parser → print DataFrame head against live API
+
+---
