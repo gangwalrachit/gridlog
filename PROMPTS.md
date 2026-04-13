@@ -141,3 +141,87 @@ touching any Python. Also ensure fresh clones can rebuild gRPC generated code.
    `query/` is the shared heart — pure logic, no framework deps.
 
 ---
+
+## Prompt 4 — TimeDB Reality Check
+
+**Date:** 13 April 2026
+**Tool:** Claude Code
+
+**Prompt:** First end-to-end test of `scripts/init_db.py` against the running
+docker stack. `td.create()` raised `TypeError: unexpected keyword argument
+'pg_connection_string'`. Paused to read the actual TimeDB source instead of
+patching blindly.
+
+**What I wanted to achieve:** Find out what TimeDB actually does, not what I
+assumed it did, before writing any more code on top of a wrong mental model.
+
+**What I found (by reading `.venv/lib/python3.13/site-packages/timedb/`):**
+
+1. **TimeDB is a TimescaleDB wrapper, not a Postgres+ClickHouse wrapper.**
+   `timedb/db/create.py` reads `sql/pg_create_table_timescaledb.sql` and runs
+   it against a single Postgres connection. First SQL line:
+   `CREATE EXTENSION IF NOT EXISTS timescaledb;`. Zero references to
+   ClickHouse in the entire package.
+
+2. **`TimeDataClient` takes one `conninfo` string**, resolved from
+   `TIMEDB_DSN` or `DATABASE_URL` env var. There are no separate Postgres and
+   ClickHouse arguments because there is no ClickHouse.
+
+3. **`overlapping_short/medium/long` are TimescaleDB hypertables** partitioned
+   on `valid_time`, not ClickHouse MergeTree tables. A view
+   `all_overlapping_raw` unions them for reads.
+
+4. **The as-of query is `DISTINCT ON (valid_time) ... ORDER BY valid_time,
+   knowledge_time DESC`** — pure PostgreSQL, no `argMax`. TimeDB exposes it as
+   `read_overlapping_latest(series_id, end_known=as_of)`. Passing `end_known`
+   turns the same function into either "latest" or "as-of" — elegant.
+
+5. **`td.get_series('da_price')` returns a lazy `SeriesCollection`** even for
+   missing series — so our try/except idempotency pattern was broken (first
+   run "succeeded" silently with zero rows inserted). The correct idempotency
+   hook is `create_series()` itself, which raises `ValueError` on the
+   `(name, labels)` unique constraint. Confirmed by running `init_db.py`
+   twice and verifying a single row in `series_table`.
+
+**Key corrections:**
+
+1. **Stack collapsed to one service.** `docker-compose.yml` now runs only
+   `timescale/timescaledb:latest-pg16`. Dropped `clickhouse` service,
+   `docker/clickhouse/` config dir, `chdata` volume. Also wiped the old
+   `pgdata` volume so the new image initializes cleanly with the TimescaleDB
+   extension.
+
+2. **Config simplified.** `gridlog/config.py` dropped all `CLICKHOUSE_*`
+   settings. Added a `timedb_dsn` property and a one-liner
+   `os.environ.setdefault("TIMEDB_DSN", settings.timedb_dsn)` at import
+   time — so any module that imports `gridlog.config` gets a ready-to-use
+   TimeDB client without having to pass connection args.
+
+3. **`gridlog/store/series.py` rewritten.** `init_store()` is now
+   `td.create(retention_short="6 months")` — no kwargs for connection.
+   `ensure_series()` catches `ValueError` on `create_series()` for
+   idempotency.
+
+4. **ARCHITECTURE.md rewritten.** Stack table, data model, as-of query SQL,
+   infrastructure, and folder structure all now reflect the TimescaleDB
+   reality. Prior entries in PROMPTS.md (Prompts 1–3) are left untouched —
+   they are the honest record of what I believed at each point. This prompt
+   is the correction.
+
+**Why this is actually a better outcome:**
+
+- TimescaleDB *is* part of Rebase's stack via TimeDB itself, so the
+  "mirrors Rebase's real tooling" interview angle is fully intact.
+- Simpler ops: one service, one DSN, one SQL dialect.
+- Defensible story: "I assumed Postgres+ClickHouse from the project name,
+  then read the TimeDB source during the first test run, found my assumption
+  was wrong, and corrected the design in a single commit pair." That's a
+  stronger interview signal than any answer where everything worked on the
+  first try.
+
+**Lesson saved for next time:** Before committing to an architecture decision
+based on *how I think a third-party library works*, run a 30-second
+introspection pass (`inspect.signature`, `grep`, read the SQL files). Would
+have caught this on day one.
+
+---

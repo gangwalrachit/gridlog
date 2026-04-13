@@ -11,8 +11,8 @@ and query semantics. See [PROMPTS.md](PROMPTS.md) for the decision log.
 
 ## Stack
 
-PostgreSQL (series catalogue) · ClickHouse (time-series values) · TimeDB
-(Rebase Energy's SDK) · FastAPI · ENTSO-E Transparency API · Docker Compose
+TimescaleDB (via TimeDB, Rebase Energy's SDK) · FastAPI · ENTSO-E Transparency
+API · Docker Compose
 
 ## Prerequisites
 
@@ -33,7 +33,7 @@ $EDITOR .env
 # 3. Install Python deps (editable install)
 pip install -e ".[dev]"
 
-# 4. Start Postgres + ClickHouse
+# 4. Start TimescaleDB
 docker compose up -d
 
 # 5. Initialize TimeDB schema and register the day-ahead price series
@@ -57,5 +57,4 @@ the full map. Short version:
 - `proto/` — language-neutral gRPC contract
 - `frontend/` — Leaflet + D3 map (Phase 2)
 - `scripts/` — runnable entrypoints (`init_db.py`, `run_ingest.py`, `demo_diff.py`, …)
-- `docker/` — Postgres + ClickHouse configs consumed by `docker-compose.yml`
 - `fixtures/` — saved ENTSO-E XML for the fake client and tests

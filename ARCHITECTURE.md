@@ -13,17 +13,16 @@ hindsight bias.
 
 ## Stack
 
-| Layer          | Technology                    | Role                                                      | Phase |
-| -------------- | ----------------------------- | --------------------------------------------------------- | ----- |
-| Data source    | ENTSO-E Transparency API      | Free European electricity market data                     | 1     |
-| Metadata store | PostgreSQL 16                 | Series catalogue (dimension table)                        | 1     |
-| Value store    | ClickHouse 24.x               | Time-series facts (fact table), columnar, append-only     | 1     |
-| SDK            | TimeDB (`pip install timedb`) | Rebase Energy's Python SDK wrapping Postgres + ClickHouse | 1     |
-| API            | FastAPI                       | Query layer → thin browser gateway (HTTP → gRPC)          | 1→2   |
-| Data wrangling | pandas / Polars               | Normalize ENTSO-E XML → TimeDB TimeSeries                 | 1     |
-| Infrastructure | Docker Compose                | Local Postgres + ClickHouse                               | 1     |
-| gRPC service   | grpcio + protobuf             | Core data service — all business logic lives here         | 2     |
-| Frontend       | Leaflet.js + D3.js            | 2D European price map with time slider                    | 2     |
+| Layer          | Technology                    | Role                                                             | Phase |
+| -------------- | ----------------------------- | ---------------------------------------------------------------- | ----- |
+| Data source    | ENTSO-E Transparency API      | Free European electricity market data                            | 1     |
+| Storage        | TimescaleDB (PostgreSQL 16)   | Single source of truth — series catalogue and hypertable values  | 1     |
+| SDK            | TimeDB (`pip install timedb`) | Rebase Energy's Python SDK wrapping TimescaleDB                  | 1     |
+| API            | FastAPI                       | Query layer → thin browser gateway (HTTP → gRPC)                 | 1→2   |
+| Data wrangling | pandas / Polars               | Normalize ENTSO-E XML → TimeDB TimeSeries                        | 1     |
+| Infrastructure | Docker Compose                | Local TimescaleDB                                                | 1     |
+| gRPC service   | grpcio + protobuf             | Core data service — all business logic lives here                | 2     |
+| Frontend       | Leaflet.js + D3.js            | 2D European price map with time slider                           | 2     |
 
 ## Core Concept: Time-of-Knowledge
 
@@ -42,19 +41,23 @@ point in the past.
 
 ## Data Model
 
-### Postgres — Series Catalogue (dimension table)
+Everything lives in **one TimescaleDB instance**. TimeDB creates the schema via
+`td.create()` — we never write this DDL ourselves. The tables below exist so
+we can reason about the system, not because we manage them.
 
-Managed by TimeDB via `td.create()`. We don't write this SQL directly.
+### `series_table` — Series Catalogue
+
+Regular PostgreSQL table. One row per logical series.
 
 | Column        | Type                  | Purpose                                                 |
 | ------------- | --------------------- | ------------------------------------------------------- |
-| `series_id`   | BigInteger (PK, auto) | Internal identifier                                     |
+| `series_id`   | BigSerial (PK)        | Internal identifier                                     |
 | `name`        | Text                  | Series name, e.g. `"da_price"`                          |
 | `unit`        | Text                  | `"EUR/MWh"`                                             |
 | `labels`      | JSONB                 | `{"zone": "SE3", "resolution": "PT1H"}`                 |
 | `description` | Text                  | Human-readable description                              |
 | `overlapping` | Boolean               | **`true`** — enables time-of-knowledge revision history |
-| `retention`   | Text                  | `"short"` (6-month TTL in ClickHouse)                   |
+| `retention`   | Text                  | `"short"` (6-month retention tier)                      |
 | `inserted_at` | Timestamptz           | Auto-populated                                          |
 
 **Constraints:**
@@ -66,29 +69,30 @@ Managed by TimeDB via `td.create()`. We don't write this SQL directly.
 **Why JSONB labels instead of dedicated columns?** Expanding to more zones or
 adding `market_type: "intraday"` later requires no schema migration.
 
-### ClickHouse — Values (fact table)
+### `overlapping_short` — Versioned Values (TimescaleDB hypertable)
 
-Since `overlapping=True` and `retention="short"`, TimeDB uses the
-`overlapping_short` table (6-month TTL, auto-expires).
+Since `overlapping=True` and `retention="short"`, TimeDB routes inserts to the
+`overlapping_short` hypertable. There are three retention tiers
+(`overlapping_short`, `overlapping_medium`, `overlapping_long`), each with its
+own retention policy; `all_overlapping_raw` is a `UNION ALL` view across all
+three that reads treat as a single table.
 
-| Column           | Type                 | Purpose                                   |
-| ---------------- | -------------------- | ----------------------------------------- |
-| `series_id`      | UInt64               | FK to Postgres catalogue                  |
-| `valid_time`     | DateTime64(3, 'UTC') | Delivery hour this price is for           |
-| `knowledge_time` | DateTime64(3, 'UTC') | When this value became known              |
-| `change_time`    | DateTime64(3, 'UTC') | When the row was written (auto by TimeDB) |
-| `value`          | Float64              | Price in EUR/MWh                          |
-| `changed_by`     | String               | Audit trail                               |
-| `run_id`         | UUID                 | Groups rows from same ingest batch        |
+| Column           | Type        | Purpose                                      |
+| ---------------- | ----------- | -------------------------------------------- |
+| `series_id`      | BigInt      | FK to `series_table`                         |
+| `valid_time`     | Timestamptz | Delivery hour this price is for              |
+| `knowledge_time` | Timestamptz | When this value became known                 |
+| `change_time`    | Timestamptz | When the row was written (auto by TimeDB)    |
+| `value`          | Double      | Price in EUR/MWh                             |
+| `batch_id`       | BigInt      | FK to `batches_table` — ingest audit trail   |
 
-**Engine:** `MergeTree()` \
-**Sort key:** `ORDER BY (series_id, valid_time, knowledge_time, change_time)` \
-**Partitioning:** Monthly on `valid_time`
+**Engine:** TimescaleDB hypertable, partitioned by `valid_time` (monthly chunks). \
+**Retention policy:** `drop_chunks` after `6 months` (managed by TimescaleDB). \
+**Indexes:** TimeDB creates indexes supporting `(series_id, valid_time, knowledge_time DESC)` access.
 
-**Why this sort key?** The as-of query filters on `series_id` (equality), scans
-`valid_time` (range), then picks the best `knowledge_time` (max ≤ as_of). The
-sort key matches this access pattern exactly — ClickHouse skips entire granules
-without scanning irrelevant data.
+**Why a hypertable instead of a plain table?** TimescaleDB transparently
+partitions by time into chunks, runs retention as a background job, and can
+compress older chunks — all without us writing partition DDL.
 
 ### TimeDB Series Definition
 
@@ -121,27 +125,31 @@ TimeDB supports four temporal shapes. We use **VERSIONED**:
 The core query — "what did the market look like at time X?"
 
 ```sql
-SELECT
-    valid_time,
-    argMax(value, knowledge_time) AS price
-FROM overlapping_short
-WHERE series_id = :series_id
-  AND valid_time BETWEEN :start AND :end
-  AND knowledge_time <= :as_of
-GROUP BY valid_time
-ORDER BY valid_time
+SELECT DISTINCT ON (v.valid_time)
+    v.valid_time,
+    v.value
+FROM all_overlapping_raw v
+WHERE v.series_id = :series_id
+  AND v.valid_time >= :start
+  AND v.valid_time <  :end
+  AND v.knowledge_time < :as_of
+ORDER BY v.valid_time, v.knowledge_time DESC;
 ```
 
-- `argMax(value, knowledge_time)` = the value from the row with the highest
-  knowledge_time — but bounded by `<= :as_of`
-- Remove the `knowledge_time` filter → latest-known prices
+- `DISTINCT ON (valid_time) ... ORDER BY valid_time, knowledge_time DESC` picks
+  the row with the highest `knowledge_time` for each `valid_time` — the
+  PostgreSQL idiom for "latest version per key"
+- Remove the `knowledge_time < :as_of` filter → latest-known prices (no cutoff)
 - The **diff** between these two results is the demo money shot
 
-**Why not a materialized view?** In ClickHouse, a materialized view is a
-write-time trigger (not a cache). It computes on INSERT and stores results in a
-second table. Our query is parameterized by `:as_of` — a query-time input that
-isn't known at write time. Therefore, query-time computation with `argMax` is
-not just simpler, it's the only correct option.
+TimeDB exposes this directly via `read_overlapping_latest(series_id=..., end_known=as_of)`.
+Our `query/` module wraps it with the (zone, start, end) signature our API uses.
+
+**Why not a materialized view?** The `:as_of` parameter is a query-time input.
+A materialized view can only precompute results for values known at write time,
+so the only correct approach is to compute per query. TimescaleDB's
+`(series_id, valid_time, knowledge_time DESC)` index makes this cheap: the
+planner uses it to skip directly to the winning row for each `valid_time`.
 
 ---
 
@@ -165,15 +173,14 @@ knowledge_time = doc.created_datetime or datetime.utcnow()
 
 ## Error Taxonomy
 
-| Scenario                                 | Severity | Action                                          |
-| ---------------------------------------- | -------- | ----------------------------------------------- |
-| XML parse failure (bad ENTSO-E response) | WARN     | Skip row, log details                           |
-| Network timeout / HTTP 5xx               | WARN     | Skip cycle, retry next run                      |
-| Missing `createdDateTime` in XML         | INFO     | Fall back to `datetime.utcnow()`                |
-| Duplicate `(valid_time, knowledge_time)` | DEBUG    | Expected from re-fetches; deduped by ClickHouse |
-| ClickHouse unreachable                   | ERROR    | Halt ingest                                     |
-| Postgres unreachable                     | ERROR    | Halt ingest (can't resolve series_id)           |
-| ENTSO-E returns 0 rows                   | WARN     | Log — auction may not have run yet              |
+| Scenario                                 | Severity | Action                                             |
+| ---------------------------------------- | -------- | -------------------------------------------------- |
+| XML parse failure (bad ENTSO-E response) | WARN     | Skip row, log details                              |
+| Network timeout / HTTP 5xx               | WARN     | Skip cycle, retry next run                         |
+| Missing `createdDateTime` in XML         | INFO     | Fall back to `datetime.utcnow()`                   |
+| Duplicate `(valid_time, knowledge_time)` | DEBUG    | Expected from re-fetches; handled by TimeDB insert |
+| TimescaleDB unreachable                  | ERROR    | Halt ingest                                        |
+| ENTSO-E returns 0 rows                   | WARN     | Log — auction may not have run yet                 |
 
 ---
 
@@ -181,19 +188,19 @@ knowledge_time = doc.created_datetime or datetime.utcnow()
 
 ### Docker Compose Services
 
-| Service      | Image                               | Ports                    | Purpose          |
-| ------------ | ----------------------------------- | ------------------------ | ---------------- |
-| `postgres`   | `postgres:16`                       | `5432:5432`              | Series catalogue |
-| `clickhouse` | `clickhouse/clickhouse-server:24.x` | `8123:8123`, `9000:9000` | Value store      |
+| Service       | Image                               | Ports       | Purpose                                |
+| ------------- | ----------------------------------- | ----------- | -------------------------------------- |
+| `timescaledb` | `timescale/timescaledb:latest-pg16` | `5432:5432` | Series catalogue + hypertable values   |
 
-Both services use named volumes for persistence, health checks for readiness,
-and a shared network (`gridlog-net`).
+Single service, named volume `tsdata` for persistence, health check via
+`pg_isready`, shared network `gridlog-net` (reserved for when we add the gRPC
+service container in Phase 2).
 
 ### Timezone Rule
 
-**Everything is UTC.** All timestamps stored as `DateTime64(3, 'UTC')` in
-ClickHouse and `timestamptz` in Postgres. Conversion to CET/CEST happens only
-at the API/display boundary. Sweden observes DST — UTC avoids that entirely.
+**Everything is UTC.** All timestamps stored as `timestamptz` in PostgreSQL.
+Conversion to CET/CEST happens only at the API/display boundary. Sweden
+observes DST — UTC avoids that entirely.
 
 ## Dual Interface Architecture
 
@@ -237,7 +244,7 @@ API" to "a thin HTTP gateway for browsers."
                    │
           ┌─────────────────┐
           │    TimeDB       │
-          │  PG + ClickHouse│
+          │   TimescaleDB   │
           └─────────────────┘
 ```
 
@@ -276,8 +283,6 @@ Designed for all phases upfront so we don't restructure later.
 
 ```
 gridlog/
-├── docker/                     # Docker Compose + init configs
-│   └── clickhouse-config/      # ClickHouse users.xml overrides if needed
 ├── proto/                      # .proto definitions (Phase 2, but reserved now)
 │   └── prices.proto
 ├── gridlog/                    # Python package
