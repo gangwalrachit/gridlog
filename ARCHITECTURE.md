@@ -17,7 +17,7 @@ hindsight bias.
 | -------------- | ----------------------------- | ---------------------------------------------------------------- | ----- |
 | Data source    | ENTSO-E Transparency API      | Free European electricity market data                            | 1     |
 | Storage        | TimescaleDB (PostgreSQL 16)   | Single source of truth — series catalogue and hypertable values  | 1     |
-| SDK            | TimeDB (`pip install timedb`) | Rebase Energy's Python SDK wrapping TimescaleDB                  | 1     |
+| SDK            | TimeDB (`pip install timedb`) | Open-source Python SDK wrapping TimescaleDB                      | 1     |
 | API            | FastAPI                       | Query layer → thin browser gateway (HTTP → gRPC)                 | 1→2   |
 | Data wrangling | pandas / Polars               | Normalize ENTSO-E XML → TimeDB TimeSeries                        | 1     |
 | Infrastructure | Docker Compose                | Local TimescaleDB                                                | 1     |
@@ -263,7 +263,7 @@ the query module, and FastAPI's route handlers shrink to ~3 lines each.
 
 - Single bidding zone: SE3
 - Day-ahead hourly prices only
-- FakeEntsoeClient for development (real client when API token is approved)
+- Real ENTSO-E HTTP client (single code path)
 - FastAPI with as-of and latest endpoints
 - Demo script showing the diff
 
@@ -287,10 +287,9 @@ gridlog/
 │   └── prices.proto
 ├── gridlog/                    # Python package
 │   ├── config.py               # Single source of truth for env/settings (pydantic-settings)
-│   ├── entsoe/                 # ENTSO-E API client (real + fake)
-│   │   ├── client.py           # Real client — HTTP to ENTSO-E Transparency API
-│   │   ├── fake.py             # Fixture-replay client for dev/tests
-│   │   └── parser.py           # XML → normalized DataFrames
+│   ├── entsoe/                 # ENTSO-E API client
+│   │   ├── client.py           # HTTP client — ENTSO-E Transparency API
+│   │   └── parser.py           # XML → normalized DataFrames (pure function)
 │   ├── ingest/                 # Writer path: fetch → normalize → append to TimeDB
 │   │   └── pipeline.py
 │   ├── store/                  # TimeDB wiring: series catalogue + value helpers
@@ -315,7 +314,7 @@ gridlog/
 ├── tests/
 │   ├── unit/
 │   └── integration/
-├── fixtures/                   # Saved ENTSO-E XML for FakeEntsoeClient + tests
+├── fixtures/                   # Captured ENTSO-E XML responses — deterministic parser test data
 ├── notebooks/                  # Exploration (optional, not in package)
 ├── ARCHITECTURE.md
 ├── PROMPTS.md
@@ -336,5 +335,7 @@ gridlog/
   `gridlog/grpc_service/generated/` (gitignored, rebuilt on `make proto`).
 - **`frontend/` at the repo root** — it's a separate deliverable (static
   files), not a Python module.
-- **`fixtures/` separated from `tests/`** — used by both `FakeEntsoeClient`
-  (runtime) and tests. Not test-only data.
+- **`fixtures/` separated from `tests/`** — captured real ENTSO-E XML
+  responses, reused by unit tests on the parser so tests stay deterministic
+  and don't hit the network. Kept at repo root (not under `tests/`) because
+  they're first-class data, not test scaffolding.

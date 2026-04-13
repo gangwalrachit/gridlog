@@ -11,7 +11,7 @@ and query semantics. See [PROMPTS.md](PROMPTS.md) for the decision log.
 
 ## Stack
 
-TimescaleDB (via TimeDB, Rebase Energy's SDK) · FastAPI · ENTSO-E Transparency
+TimescaleDB (via the TimeDB SDK) · FastAPI · ENTSO-E Transparency
 API · Docker Compose
 
 ## Prerequisites

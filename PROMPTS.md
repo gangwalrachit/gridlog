@@ -29,8 +29,9 @@ autocomplete.
    timestamp) as `knowledge_time`, fall back to `datetime.utcnow()` when
    missing. Log which branch was taken per row.
 
-3. **Bidding zone** — start with SE3 (Swedish, aligns with Rebase being a
-   Swedish company). Schema is series-keyed so expanding is trivial.
+3. **Bidding zone** — start with SE3 (Swedish bidding zone, straightforward
+   data availability via ENTSO-E). Schema is series-keyed so expanding is
+   trivial.
 
 4. **Day-ahead hourly first** — simpler, fully covered by ENTSO-E's Price
    Document endpoint. Intraday continuous is a stretch goal.
@@ -49,8 +50,8 @@ autocomplete.
 8. **Unit tests + light integration** — fast unit tests on query logic, small
    integration suite against dockerized Postgres + ClickHouse.
 
-9. **Retention: `short`** — 6-month TTL in ClickHouse. Plenty for a portfolio
-   demo.
+9. **Retention: `short`** — 6-month TTL in ClickHouse. Plenty for this
+   project.
 
 10. **Transient ingest failures are OK** — WARN and skip cycle. ENTSO-E
     accumulates revisions server-side; next fetch picks them up. Never skip
@@ -68,7 +69,7 @@ determine exact Postgres and ClickHouse schemas. Proposed data model for user
 review.
 
 **What I wanted to achieve:** Nail down the data model on paper before writing
-any code, so every design choice is defensible in an interview.
+any code, so every design choice is defensible.
 
 **Key decisions from this prompt:**
 
@@ -210,18 +211,76 @@ assumed it did, before writing any more code on top of a wrong mental model.
 
 **Why this is actually a better outcome:**
 
-- TimescaleDB *is* part of Rebase's stack via TimeDB itself, so the
-  "mirrors Rebase's real tooling" interview angle is fully intact.
+- TimescaleDB is exactly what TimeDB is built for, so the "uses an
+  idiomatic TimescaleDB stack" angle is fully intact.
 - Simpler ops: one service, one DSN, one SQL dialect.
 - Defensible story: "I assumed Postgres+ClickHouse from the project name,
   then read the TimeDB source during the first test run, found my assumption
   was wrong, and corrected the design in a single commit pair." That's a
-  stronger interview signal than any answer where everything worked on the
-  first try.
+  stronger story than one where everything worked on the first try.
 
 **Lesson saved for next time:** Before committing to an architecture decision
 based on *how I think a third-party library works*, run a 30-second
 introspection pass (`inspect.signature`, `grep`, read the SQL files). Would
 have caught this on day one.
+
+---
+
+## Prompt 5 — Drop FakeEntsoeClient, Keep Fixtures as Test Data
+
+**Date:** 13 April 2026
+**Tool:** Claude Code
+
+**Prompt:** With the ENTSO-E API token live and verified, do we still need
+the `FakeEntsoeClient` runtime abstraction planned in Prompt 1?
+
+**What I wanted to achieve:** Shed an abstraction that was only a hedge
+against the token never arriving, without losing the testing benefits that
+saved XML fixtures give us.
+
+**Key decisions from this prompt:**
+
+1. **`FakeEntsoeClient` dropped.** Prompt 1 decision #1 ("FakeEntsoeClient
+   first") is superseded. Rationale: the hedge has served its purpose; the
+   token works; the fake was never intended to outlive the real client.
+   Keeping both would invite fake/real drift (the classic "tests pass
+   against the mock but prod breaks because the real API behaves
+   differently" failure mode).
+
+2. **`fixtures/` stays, role changes.** Previously planned as a dual-use
+   directory (runtime-replay source for the fake client + test data).
+   Now it is purely captured real ENTSO-E XML responses used by unit tests
+   on `gridlog/entsoe/parser.py`. The parser is a pure function (bytes →
+   DataFrame), so fixture-driven unit tests give full coverage without
+   touching the network.
+
+3. **Test strategy made explicit:**
+   - **Unit tests** (`tests/unit/`) — parse fixture XML, assert on the
+     resulting DataFrame. Deterministic, fast, no network.
+   - **Integration tests** (`tests/integration/`) — hit the real ENTSO-E
+     API with the live token. Marked `@pytest.mark.slow` (or similar) so
+     they're opt-in, not part of the default run. Covers the "does the
+     real API still match what we think it does" question.
+
+4. **`gridlog/entsoe/` shape finalized:**
+   - `client.py` — the only HTTP client (no `real_client.py` / `fake.py`
+     split)
+   - `parser.py` — pure function, bytes → DataFrame
+   - No `fake.py`. No `__init__.py` re-export gymnastics.
+
+5. **One small capture helper will live in `scripts/`** (e.g.
+   `scripts/capture_fixture.py`) — run manually when we need to record a
+   new fixture. Not part of the runtime package. Keeps the `gridlog/`
+   package clean.
+
+**Why this is the right call now:**
+
+- Single code path from fetch to store. Less surface area, fewer lies
+  possible in the tests.
+- Real-response fixtures are a stronger testing pattern than hand-written
+  mocks: the tests exercise the parser against bytes that have actually
+  been on the wire, caught in the wild.
+- Less code to explain and defend. The `FakeEntsoeClient` abstraction was
+  always going to be a footnote; now it's a non-entity.
 
 ---
