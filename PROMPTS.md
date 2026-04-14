@@ -367,3 +367,55 @@ straight implementation pass with no open questions.
 7. Round-trip smoke: client → parser → print DataFrame head against live API
 
 ---
+
+## Prompt 7 — `EntsoeClient` Implementation + Live Smoke Test
+
+**Date:** 14 April 2026
+**Tool:** Claude Code
+
+**Prompt:** Implement `gridlog/entsoe/client.py` per Prompt 6, smoke-test
+against the live ENTSO-E API for SE3 day-ahead, and commit.
+
+**What I wanted to achieve:** First byte-of-real-data moment — prove the
+client actually reaches ENTSO-E and comes back with a usable XML document
+before writing the parser on top of it.
+
+**Key decisions from this prompt:**
+
+1. **Defensive UTC normalization at the API boundary.** `_require_utc()`
+   raises on naive datetimes and coerces tz-aware to UTC before formatting
+   the `periodStart` / `periodEnd` params. ENTSO-E docs say the API takes
+   UTC, but "we trust it's UTC" is the kind of assumption that breaks on
+   DST transitions. Verified against the published ENTSO-E API guide — both
+   request params and response timestamps are UTC. The helper means a
+   caller can never accidentally send a local-time window.
+
+2. **Retry strategy deferred.** Skipping backoff / retry for now — Prompt 1
+   already decided transient failures are WARN-and-skip (ENTSO-E
+   accumulates revisions server-side, next cycle picks them up). Revisit
+   only if a stress test shows meaningful loss. Added to the running
+   "things to decide later" list.
+
+3. **`base_url` dropped from `httpx.Client` after a 404 on the first live
+   call.** Root cause: `httpx.Client(base_url="…/api").get("")` joins to
+   `…/api/` with a trailing slash, and ENTSO-E 404s on `/api/` (it only
+   answers on `/api`). Fix is to construct the client without `base_url`
+   and pass the full URL to `.get()`. One-line comment in the source
+   explains *why* the base_url was intentionally removed, so a future
+   refactor doesn't silently re-introduce the bug.
+
+4. **Smoke test window.** Picked a closed historical day
+   (`2026-04-12 22:00 UTC → 2026-04-13 22:00 UTC`, SE3's April 13 delivery
+   day in local time) rather than tomorrow's publication window — avoids
+   flakiness around the ~12:45 CET day-ahead publication cutoff. Returned
+   14,829 bytes of valid XML with `<TimeSeries>` and `<Point>` elements —
+   exactly what the parser will consume next.
+
+**Deferred to later prompts:**
+- Retry / backoff strategy — revisit after a stress test shapes the real
+  failure modes.
+- Multi-zone support — the client already accepts `zone_eic` as a
+  parameter; `SE3_EIC` stays as a convenience constant until a second zone
+  actually lands.
+
+---
