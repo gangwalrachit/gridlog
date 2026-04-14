@@ -1,22 +1,17 @@
-"""TimeDB wiring: initialize schema and register the day-ahead price series."""
+"""TimeDB wiring: schema init and series registration."""
 
 import timedb as td
 
-import gridlog.config  # noqa: F401  — sets TIMEDB_DSN in environment
+import gridlog.config  # noqa: F401  — sets TIMEDB_DSN on import
 
 
 def init_store() -> None:
-    """Create TimeDB schema (idempotent). Reads connection from TIMEDB_DSN."""
+    """Create TimeDB schema (idempotent)."""
     td.create(retention_short="6 months")
 
 
 def ensure_series() -> None:
-    """Register the SE3 day-ahead price series if not already present.
-
-    TimeDB's get_series() returns a lazy collection even for missing series,
-    so we can't probe existence that way. create_series() raises ValueError
-    on the (name, labels) unique constraint — that's the real idempotency hook.
-    """
+    """Register the SE3 day-ahead price series (idempotent via ValueError on duplicate)."""
     try:
         td.create_series(
             name="da_price",
