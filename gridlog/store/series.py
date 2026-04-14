@@ -16,8 +16,8 @@ def ensure_series() -> None:
         td.create_series(
             name="da_price",
             unit="EUR/MWh",
-            labels={"zone": "SE3", "resolution": "PT1H"},
-            description="ENTSO-E day-ahead hourly price for SE3",
+            labels={"zone": "SE3", "resolution": "PT15M"},
+            description="ENTSO-E day-ahead 15-min price for SE3",
             overlapping=True,
             retention="short",
         )

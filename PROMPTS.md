@@ -419,3 +419,80 @@ before writing the parser on top of it.
   actually lands.
 
 ---
+
+## Prompt 8 — Fixture Capture Surfaces Two Stale Assumptions
+
+**Date:** 14 April 2026
+**Tool:** Claude Code
+
+**Prompt:** Capture one live SE3 day-ahead fixture to `fixtures/` to drive
+parser unit tests.
+
+**What I wanted to achieve:** A real byte payload on disk so the parser can
+be written and tested without the network.
+
+**What the fixture revealed (before a single line of parser was written):**
+
+1. **SE3 day-ahead is now `PT15M`, not `PT1H`.** The document carries 96
+   `<Point>` elements under `<resolution>PT15M</resolution>` — one price
+   per 15 minutes, 96 prices per delivery day. This is the EU Market Time
+   Unit (MTU) reform that landed on 2025-10-01 for most day-ahead markets:
+   auctions now clear in 15-minute slots so flexibility assets (batteries,
+   demand response) can arbitrage intra-hour renewable swings that an
+   hourly block hid. Prompt 1's assumption that day-ahead means "24 rows
+   per day" was true in 2024, no longer true in 2026.
+
+2. **`<createdDateTime>` is API-response time, not auction-publication
+   time.** The fixture's `createdDateTime` = `2026-04-14T17:22:07Z` — but
+   the delivery day is 2026-04-13, and the real SE3 day-ahead auction
+   cleared around 2026-04-12 12:45 CET. ENTSO-E re-stamps the document
+   when the API generates it for a response, which means the field tells
+   you "when was this XML minted for me" not "when did the market first
+   know this price." Prompt 1 decision #2 (use `<createdDateTime>` as
+   `knowledge_time`) is therefore semantically off.
+
+**Key decisions from this prompt:**
+
+1. **Series label updated to `PT15M`.** `gridlog/store/series.py`:
+   `labels={"zone": "SE3", "resolution": "PT15M"}`. One-line change —
+   TimeDB's VERSIONED shape is resolution-agnostic, the label is purely
+   metadata on the series row. Row volume goes from 24/day to 96/day,
+   nothing else moves.
+
+2. **Stale `PT1H` series row wiped.** `(name, labels)` is TimeDB's
+   uniqueness key, so simply re-running `init_db.py` would leave the old
+   `PT1H` row in place and create a second `PT15M` row — the ingest
+   pipeline wouldn't know which to target. Dev DB has zero price data so
+   the safe move is `docker compose down -v && up -d && init_db.py`.
+
+3. **`knowledge_time = datetime.now(UTC)` at fetch time,** not
+   `<createdDateTime>`. Prompt 1 decision #2 is superseded. Rationale:
+   ENTSO-E doesn't expose the original auction-publication time via the
+   public API — `<createdDateTime>` is just the document-generation time.
+   Using fetch time is honest about what we actually know: "GridLog
+   learned this price at T." It also gives a cleaner revision story in the
+   demo — every re-fetch produces a new `knowledge_time` for the same
+   `valid_time`, which is exactly the time-of-knowledge story we want to
+   show. The `<createdDateTime>` field is still parsed and captured in
+   batch metadata for audit purposes, but doesn't drive storage.
+
+4. **Window signature paid off.** Prompt 6 decision #3 chose
+   `(start, end)` over `(day: date)` with the explicit prediction "stays
+   stable when we eventually add intraday 15-min resolution." That
+   prediction cashed in the first time we saw a real document — zero
+   changes to `fetch_day_ahead()` needed for PT15M. A `(day: date)`
+   signature would have meant a breaking API change right here.
+
+**Why this is a better outcome:**
+
+- Honest semantics. "Knowledge time = when GridLog learned it" is
+  defensible; "knowledge time = when the market published it" was always
+  going to be a white lie given what ENTSO-E exposes.
+- Richer demo. 96 rows/day vs 24 rows/day gives the as-of-query viz 4×
+  more points to plot, which makes the time-of-knowledge animation
+  noticeably smoother.
+- One more datapoint for the "read the real data before committing to a
+  mental model" lesson from Prompt 4. Capture-first would have caught the
+  PT15M and `createdDateTime` assumptions on day one.
+
+---
