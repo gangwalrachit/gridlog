@@ -8,7 +8,9 @@ import pytest
 
 from gridlog.entsoe.parser import parse_day_ahead
 
-FIXTURE = Path(__file__).resolve().parents[2] / "fixtures" / "se3_da_2026-04-13.xml"
+FIXTURES = Path(__file__).resolve().parents[2] / "fixtures"
+FIXTURE = FIXTURES / "se3_da_2026-04-13.xml"
+FIXTURE_COMPRESSED = FIXTURES / "se3_da_2026-04-14.xml"
 KT = datetime(2026, 4, 14, 17, 22, 7, tzinfo=UTC)
 
 EMPTY_DOC = b"""<?xml version="1.0" encoding="utf-8"?>
@@ -69,3 +71,21 @@ def test_empty_document_returns_empty_typed_frame():
 def test_unsupported_resolution_raises():
     with pytest.raises(ValueError, match="unsupported ISO duration"):
         parse_day_ahead(BAD_RESOLUTION_DOC, KT)
+
+
+def test_a03_compression_forward_fills_missing_positions():
+    """se3_da_2026-04-14.xml has 95 Points (position 29 omitted) for a 96-slot day."""
+    df = parse_day_ahead(FIXTURE_COMPRESSED.read_bytes(), KT)
+
+    # Always 96 rows regardless of how many explicit Points the source carried.
+    assert df.shape == (96, 3)
+
+    # Position 29 (index 28) inherits position 28's value (95.0 per the raw XML).
+    # Position 30 (index 29) resumes with its own value (98.22).
+    assert df["value"].iloc[27] == pytest.approx(95.0)
+    assert df["value"].iloc[28] == pytest.approx(95.0)
+    assert df["value"].iloc[29] == pytest.approx(98.22)
+
+    # Cadence still 15 min, no gaps.
+    diffs = df["valid_time"].diff().dropna().unique()
+    assert len(diffs) == 1 and diffs[0] == pd.Timedelta(minutes=15)

@@ -31,22 +31,33 @@ def _typed(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def parse_day_ahead(raw: bytes, knowledge_time: datetime) -> pd.DataFrame:
-    """Parse A44 document → (knowledge_time, valid_time, value) rows."""
+    """Parse A44 document → (knowledge_time, valid_time, value) rows.
+
+    ENTSO-E A03 curves compress consecutive equal prices: missing positions
+    carry the most recent explicit value forward.
+    """
     root = ET.fromstring(raw)
     rows: list[tuple[datetime, datetime, float]] = []
 
     for period in root.findall(f".//{{{NS}}}TimeSeries/{{{NS}}}Period"):
         start = _parse_utc(period.findtext(f"{{{NS}}}timeInterval/{{{NS}}}start"))
+        end = _parse_utc(period.findtext(f"{{{NS}}}timeInterval/{{{NS}}}end"))
         resolution = _parse_iso_duration(period.findtext(f"{{{NS}}}resolution"))
+        slots = int((end - start) / resolution)
 
-        points = period.findall(f"{{{NS}}}Point")
-        positions = [int(p.findtext(f"{{{NS}}}position")) for p in points]
-        if positions != list(range(1, len(positions) + 1)):
-            raise ValueError(f"non-contiguous Point positions: {positions[:5]}")
+        explicit: dict[int, float] = {
+            int(p.findtext(f"{{{NS}}}position")): float(p.findtext(f"{{{NS}}}price.amount"))
+            for p in period.findall(f"{{{NS}}}Point")
+        }
+        if 1 not in explicit:
+            raise ValueError("Period missing position 1; nothing to forward-fill from")
+        if explicit and max(explicit) > slots:
+            raise ValueError(f"Point position {max(explicit)} exceeds slot count {slots}")
 
-        for p, pos in zip(points, positions):
-            price = float(p.findtext(f"{{{NS}}}price.amount"))
-            rows.append((knowledge_time, start + (pos - 1) * resolution, price))
+        last = explicit[1]
+        for pos in range(1, slots + 1):
+            last = explicit.get(pos, last)
+            rows.append((knowledge_time, start + (pos - 1) * resolution, last))
 
     if not rows:
         return _typed(pd.DataFrame(columns=_COLUMNS))

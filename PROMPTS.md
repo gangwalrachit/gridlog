@@ -496,3 +496,93 @@ be written and tested without the network.
   PT15M and `createdDateTime` assumptions on day one.
 
 ---
+
+## Prompt 9 — A03 Curves Compress Consecutive Equal Prices
+
+**Date:** 15 April 2026
+**Tool:** Claude Code
+
+**Prompt:** Round-trip smoke test of `client → parser` against a second live
+SE3 day-ahead fetch, to close out the `entsoe/` module before moving to
+ingest.
+
+**What I wanted to achieve:** Final confidence that the client and parser
+compose cleanly on real data — not just on the single captured fixture —
+before declaring the module done.
+
+**What broke on the first live fetch:**
+
+The parser raised `non-contiguous Point positions: [1, 2, 3, 4, 5]` on a
+perfectly valid ENTSO-E document. The `<TimeSeries>` carried 95 `<Point>`
+elements with positions `1..28, 30..96` — position 29 was missing, and
+positions 28 and 30 had **different** prices (95.0 and 98.22). The
+yesterday fixture had all 96 positions intact and worked fine.
+
+**Root cause — A03 curveType is run-length compressed:**
+
+ENTSO-E's A03 "sequential fixed size block" curve type has a compression
+rule I missed on first read: *when consecutive slots share the same price,
+only the first slot emits an explicit `<Point>`; the rest are omitted and
+inherit the most recent explicit value by forward-fill.* In yesterday's
+fixture, every consecutive pair of prices happened to differ, so all 96
+Points were emitted and my wrong "positions must be 1..N" invariant
+silently held. In today's fetch, position 28 and 29 both had price 95.0,
+so ENTSO-E dropped position 29 from the document. This is standard
+compression for A03, documented in the ENTSO-E Implementation Guide —
+discovered on the first compressed document we fetched.
+
+My explanation of A03 in Prompt 6 / Prompt 8 ("positions are 1..N with no
+holes, a gap is a data error") was wrong. Corrected semantic: *missing
+positions are not errors; they are duplicates of the last explicit value.*
+
+**Key decisions from this prompt:**
+
+1. **Parser rewritten to forward-fill.** Computes expected slot count
+   `slots = (period.end - period.start) / resolution`, walks `1..slots`,
+   carries the last explicit price forward whenever a position is missing.
+   Output DataFrame always has `slots` rows regardless of how many
+   explicit `<Point>` elements the source document carried.
+
+2. **Fail-loud invariants preserved, just on the right things now.**
+   - Position 1 missing → `ValueError` (nothing to forward-fill from).
+   - `max(position) > slots` → `ValueError` (malformed document, points
+     off the end of the declared Period).
+   - Unknown resolution → `ValueError` (as before).
+
+3. **Second fixture captured.** `fixtures/se3_da_2026-04-14.xml` is the
+   today-fetch document with the missing position 29. Kept as a
+   regression fixture for the compression path — the yesterday fixture
+   exercises the "all positions present" path, the today fixture
+   exercises the "forward-fill" path. Both paths now have a real-world
+   test.
+
+4. **Unit test added** (`test_a03_compression_forward_fills_missing_positions`).
+   Asserts: 96 output rows from 95 input points, index 28 (position 29)
+   equals index 27 (position 28) at 95.0, index 29 (position 30) resumes
+   with its own value 98.22, cadence still 15 minutes end-to-end.
+
+5. **Round-trip retry after fix:** 96 rows, single `knowledge_time`,
+   monotonic 15-minute cadence, prices match the raw XML spot-checks.
+   `entsoe/` module is now done.
+
+**Why this is a better outcome:**
+
+- The round-trip smoke test caught a real correctness bug that the unit
+  tests on the first fixture could not have caught — the first fixture
+  had no consecutive-equal-price runs, so it exercised zero compression.
+  One fixture was not enough; two are the minimum.
+- The fix is structural (always emit `slots` rows) rather than
+  opportunistic (patch this one case), which means any future compression
+  pattern — runs of length 3, 4, or longer — works without further
+  changes. There's no `len(positions) == slots - 1` special case.
+- Honest mental model correction logged in the decision log. Prompt 6 and
+  Prompt 8 said A03 is contiguous; Prompt 9 says A03 is contiguous-or-
+  compressed. Future-me reading this log doesn't have to re-discover it.
+
+**Lesson saved for next time:** One fixture is a smoke test, not a test
+suite. Before declaring an XML/JSON parser "done" on fixture data, capture
+at least two documents from the same source and diff them — any
+discrepancy is either compression, optional fields, or a schema version
+bump, and all three are things the parser needs to handle.
+
+---
