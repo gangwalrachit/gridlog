@@ -24,3 +24,9 @@ include = ["gridlog*"]
 [build-system]
 requires = ["setuptools>=75.0"]
 build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: tests that require a running TimeDB; opt-in via `pytest -m integration`",
+]
+addopts = ["-m", "not integration"]

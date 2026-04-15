@@ -4,6 +4,8 @@ import timedb as td
 
 import gridlog.config  # noqa: F401  — sets TIMEDB_DSN on import
 
+SERIES_NAME = "da_price"
+
 
 def init_store() -> None:
     """Create TimeDB schema (idempotent)."""
@@ -14,7 +16,7 @@ def ensure_series() -> None:
     """Register the SE3 day-ahead price series (idempotent via ValueError on duplicate)."""
     try:
         td.create_series(
-            name="da_price",
+            name=SERIES_NAME,
             unit="EUR/MWh",
             labels={"zone": "SE3", "resolution": "PT15M"},
             description="ENTSO-E day-ahead 15-min price for SE3",

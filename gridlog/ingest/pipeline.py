@@ -10,11 +10,11 @@ from timedb.sdk import InsertResult
 
 from gridlog.entsoe import EntsoeClient, parse_day_ahead
 from gridlog.entsoe.parser import NS
+from gridlog.store.series import SERIES_NAME
 
 logger = logging.getLogger(__name__)
 
 WORKFLOW_ID = "entsoe_da_ingest"
-SERIES_NAME = "da_price"
 
 
 def _created_datetime(raw: bytes) -> str | None:
