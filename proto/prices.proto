@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+package gridlog.v1;
+
+import "google/protobuf/timestamp.proto";
+
+service PriceService {
+  rpc GetLatest(PriceWindowRequest) returns (PriceResponse);
+  rpc GetAsOf(AsOfRequest) returns (PriceResponse);
+  rpc GetRevisions(PriceWindowRequest) returns (RevisionResponse);
+}
+
+message PriceWindowRequest {
+  string zone = 1;
+  google.protobuf.Timestamp start = 2;
+  google.protobuf.Timestamp end = 3;
+}
+
+message AsOfRequest {
+  string zone = 1;
+  google.protobuf.Timestamp start = 2;
+  google.protobuf.Timestamp end = 3;
+  google.protobuf.Timestamp as_of = 4;
+}
+
+message PriceRow {
+  google.protobuf.Timestamp valid_time = 1;
+  double value = 2;
+}
+
+message PriceResponse {
+  repeated PriceRow rows = 1;
+}
+
+message RevisionRow {
+  google.protobuf.Timestamp valid_time = 1;
+  google.protobuf.Timestamp knowledge_time = 2;
+  double value = 3;
+}
+
+message RevisionResponse {
+  repeated RevisionRow rows = 1;
+}
