@@ -206,5 +206,6 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-# gRPC generated code (rebuild with scripts/gen_proto.sh)
-gridlog/grpc_service/generated/
+# gRPC generated stubs are committed alongside proto/*.proto changes —
+# rebuild with scripts/gen_proto.sh. Keep caches out though.
+gridlog/grpc_service/generated/__pycache__/
