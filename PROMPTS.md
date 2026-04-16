@@ -586,3 +586,220 @@ discrepancy is either compression, optional fields, or a schema version
 bump, and all three are things the parser needs to handle.
 
 ---
+
+## Prompt 10 — Ingest Pipeline: Time-of-Knowledge Becomes Observable
+
+**Date:** 16 April 2026
+**Tool:** Claude Code
+
+**Prompt:** Wire `client → parser → TimeDB.insert` into a single
+`fetch_and_store()` entry point. First real write to TimeDB on real
+ENTSO-E data.
+
+**What I wanted to achieve:** Turn the two sides of the system — the
+HTTP/parser side and the storage side — into one orchestrated call that
+materialises the time-of-knowledge story on disk. Up to this prompt,
+nothing had ever been written to TimeDB with a real `knowledge_time`.
+
+**Key decisions from this prompt:**
+
+1. **Error taxonomy split: WARN-and-skip vs. raise.** Transient fetch
+   failures (`httpx.HTTPError`) log at WARNING and return `None` — the
+   next scheduled run will pick up the revision anyway, and ENTSO-E
+   accumulates its own publication history server-side. Parse failures
+   and insert failures raise loudly — if the document shape drifts or
+   TimeDB rejects a batch, silently skipping would erode the audit story
+   (Prompt 1 decision #10: "never skip revisions"). The rule of thumb:
+   *network hiccups are expected and recoverable; schema drift and
+   storage errors are not, and the operator needs to know now.*
+
+2. **`knowledge_time = datetime.now(UTC)` set at fetch start, not insert
+   time.** Matters when an insert is retried or delayed — the moment
+   GridLog *learned* the prices is when it asked for them, not when it
+   successfully flushed them. Prompt 8 decision #3 settled on fetch-time
+   semantics; this prompt operationalises it by capturing `now(UTC)`
+   once, up front, and threading it through to both `parse_day_ahead()`
+   and `series.insert(knowledge_time=…)`.
+
+3. **`batch_params` as JSONB audit envelope.** Every insert carries the
+   source tag (`entsoe_transparency_api`), document type (`A44`), zone
+   EIC, and UTC window as a dict into TimeDB's batch metadata. Costs
+   nothing at write time, gives us "how did this row get here?"
+   answerable by a single `SELECT batch_params FROM batches_table` query
+   forever. YAGNI said "skip it"; experience said "past-me always
+   regrets missing provenance." Experience won.
+
+4. **httpx INFO logging silenced to protect the ENTSO-E token.** httpx
+   logs `HTTP Request: GET …` at INFO level, which includes the full
+   query string — and ENTSO-E auth is via a `securityToken` query
+   parameter, not a header. One line in `run_ingest.py`:
+   `logging.getLogger("httpx").setLevel(logging.WARNING)`. Without it,
+   the token leaks to stdout on every run and into any log aggregator
+   that collects it. Noticed during the first end-to-end dry run — the
+   token showed up in the terminal transcript. Fixed before the first
+   real insert.
+
+5. **`SERIES_NAME` hoisted to `store/series.py` as a module constant.**
+   Ingest and query both need the series name string; defining it once
+   in the module that owns series initialisation keeps `store → ingest
+   → query` as a clean dependency chain with no string duplication.
+
+**Milestone:** After this prompt, three real SE3 batches exist in
+`overlapping_short` with distinct `knowledge_time`s. For the first time
+in the project, "what did GridLog know at time T?" is an answerable
+question against stored data rather than a design sketch.
+
+**Deferred to later prompts:**
+- Scheduler (cron / APScheduler) to drive `fetch_and_store` on a cadence.
+  For now we invoke via `scripts/run_ingest.py` manually.
+- Multi-zone fan-out — `fetch_and_store(zone_name, zone_eic, …)` is
+  already parameterised; adding a second zone is a loop, not a rewrite.
+
+---
+
+## Prompt 11 — Query Module and Integration Testing
+
+**Date:** 16 April 2026
+**Tool:** Claude Code
+
+**Prompt:** Wrap TimeDB's `SeriesCollection.read` behind a thin query
+module with three named operations, and write integration tests that
+run against a real TimeDB instance.
+
+**What I wanted to achieve:** A query surface that makes the three
+time-of-knowledge reads — latest, as-of, and full revision history —
+feel first-class rather than raw `.read(...)` calls sprinkled through
+demos and the future API.
+
+**Key decisions from this prompt:**
+
+1. **Three pure functions, no class.** `get_latest_prices`,
+   `get_prices_as_of`, `get_price_revisions`. Each is a 2–4 line wrapper
+   around `SeriesCollection.read` with a docstring that names the
+   time-of-knowledge semantic it implements. No query builder, no
+   fluent API, no repository pattern — the whole point is to make the
+   three canonical reads discoverable by name and trivially testable.
+   Anything more elaborate is YAGNI until a fourth read appears.
+
+2. **Integration tests opt-in via `pytest -m integration`.** The unit
+   tests run in milliseconds with no TimeDB. The integration tests need
+   a running Postgres + TimescaleDB and take seconds. Splitting them
+   keeps `pytest` (unit only by default) fast enough to run on every
+   save while still letting `pytest -m integration` exercise the real
+   storage contract in CI and before commits.
+
+3. **Test isolation by random far-future anchor, not teardown.**
+   `timedb.delete()` wipes the entire schema — too blunt a hammer for
+   test cleanup. Workaround: each test-module run picks a random
+   1-hour anchor in a 100-year window starting at 2100-01-01 UTC. The
+   probability of two runs colliding is negligible, and production data
+   is in the past so it's effectively unreachable from the test path.
+   `zone="TEST1"` on the series label gives a second isolation
+   dimension. Not destructive to shared state, and re-runnable locally
+   without `docker compose down -v`.
+
+4. **Module-scoped `seeded` fixture, not function-scoped.** First
+   attempt used `@pytest.fixture` (function scope), which re-seeded four
+   times across four tests at near-identical wall-clock times — the
+   random-anchor windows still differed, but the assertion `len(df) ==
+   8` failed because four seedings had landed in the module. Module
+   scope: seed once, all four tests read the same batches, row counts
+   match the math.
+
+5. **Inclusive-vs-exclusive is library-level, callers shouldn't care.**
+   The integration test for the "cutoff between batches" case passes a
+   cutoff strictly between `kt1` and `kt2` and expects batch 1 — a test
+   that would *still* pass even with TimeDB's exclusive `end_known`
+   semantics. The test for `as_of=kt1` is the one that pins down
+   inclusivity: at `kt1`, you should see batch 1. Prompt 12 makes this
+   work inside `get_prices_as_of`.
+
+---
+
+## Prompt 12 — Demo Script, Cutoff Inclusivity, and a 45-second ENTSO-E Call
+
+**Date:** 16 April 2026
+**Tool:** Claude Code
+
+**Prompt:** Build a readable command-line demo of the time-of-knowledge
+story. Side quest: a live ENTSO-E call took 45.6 seconds and timed out
+against our 30s default.
+
+**What I wanted to achieve:** A script a reviewer can run in 5 seconds
+and see, in plain text, that GridLog stores revisions and that as-of
+queries return the right batch for a given cutoff — without needing to
+read the code or the tests.
+
+**Key decisions from this prompt:**
+
+1. **Demo is a pure reader, not an ingest-plus-visualise script.** Two
+   files: `run_ingest.py` (writes) and `demo_diff.py` (reads).
+   Separation means you can run ingest in the morning, again at night,
+   and then run the demo any time in between to see whatever
+   accumulated naturally — no synthetic perturbations needed to
+   produce a revision story. The demo script has zero side effects on
+   TimeDB, which makes it safe to run against production data.
+
+2. **Inclusive `as_of` cutoff — option B (offset inside the wrapper).**
+   TimeDB's `SeriesCollection.read(end_known=T)` is strictly exclusive
+   of T, so `get_prices_as_of(…, as_of=kt1)` was returning empty at
+   the exact moment `kt1` itself. Two options considered:
+   - **A:** document the exclusivity in the docstring and let callers
+     add their own offset. Pushes the surprise onto every caller and
+     every future test.
+   - **B:** add `timedelta(microseconds=1)` inside
+     `get_prices_as_of` and document the offset in the source comment.
+     Makes the public contract what callers naturally expect — "as of T
+     means at or before T" — and localises the workaround to one place.
+
+   Chose B. The workaround is a single line with a comment; the
+   alternative was a foot-gun in every consumer. Upstream contribution
+   idea logged outside the repo (user's private memory) so we can PR it
+   back to TimeDB once GridLog is done — the right long-term fix is to
+   either flip TimeDB's default to inclusive or add an explicit
+   `as_of=` parameter with inclusive semantics, but that's a TimeDB
+   decision not a GridLog decision.
+
+3. **Demo output: revision ledger + as-of comparison table with a
+   `DIFF?` column.** The ledger lists each `knowledge_time` with its
+   row count and number of unique values — enough to see "we have three
+   snapshots, they're not identical." The as-of table then walks the
+   first five `valid_time` slots and shows the price under each
+   snapshot side-by-side, with `yes/no` for whether the prices across
+   snapshots differ. A reviewer looking at "yes" rows immediately sees
+   *which* slots got revised and by how much. Plain text, copy-pasteable
+   into a README.
+
+4. **30s → 60s default timeout in `EntsoeClient`.** One real fetch
+   took 45.6 seconds. ENTSO-E's Transparency API is cold-cache sensitive
+   for historical windows — our demo windows aren't today's. Bumping
+   the default is the simplest fix; an exponential retry with a smaller
+   timeout would be strictly better but falls under "transient failures
+   are WARN-and-skip" from Prompt 1, so it's not worth the complexity
+   yet. Noted for the retry-strategy revisit on the backlog.
+
+**Why this is a better outcome:**
+
+- The "ingest morning, ingest night, demo in between" workflow mirrors
+  the real production story of a time-of-knowledge system: prices drift
+  over the day, and the revision ledger should grow organically. A
+  synthetic perturbation script would have been a faster demo to write
+  and a worse demo to show.
+- Option B on the `as_of` cutoff means every future consumer of
+  `get_prices_as_of` — the FastAPI endpoint, the eventual gRPC handler,
+  and any notebook a reviewer writes — gets the intuitive semantic for
+  free. The one-line workaround is a cheap price for removing a
+  foot-gun from every call site.
+- The 60s timeout fix is the kind of change that's invisible until it
+  isn't. Documenting the 45.6s observation in the commit message and
+  here means future-me (or future-you) reading `timeout: float = 60.0`
+  and wondering "why not 30?" gets the answer without spelunking.
+
+**Deferred to later prompts:**
+- Retry / backoff for ENTSO-E — still deferred from Prompt 7. The 60s
+  bump buys headroom; it doesn't replace a real strategy.
+- Upstream PR to TimeDB for the `end_known` inclusivity question —
+  noted privately, to revisit once GridLog's frontend + gRPC phases are
+  done.
+
+---
