@@ -18,7 +18,7 @@ class EntsoeClient:
     DOCUMENT_TYPE_DAY_AHEAD = "A44"
     SE3_EIC = "10Y1001A1001A46L"
 
-    def __init__(self, token: str | None = None, timeout: float = 30.0):
+    def __init__(self, token: str | None = None, timeout: float = 60.0):
         # No base_url: httpx appends "/" to empty paths, and ENTSO-E 404s on /api/.
         self._client = httpx.Client(
             timeout=timeout,

@@ -1,6 +1,6 @@
 """Time-of-knowledge reads over the GridLog price series."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 import timedb
@@ -23,8 +23,13 @@ def get_prices_as_of(
     end: datetime,
     as_of: datetime,
 ) -> pd.DataFrame:
-    """Return the price per valid_time in [start, end) as known at `as_of`."""
-    return _series(zone_name).read(start_valid=start, end_valid=end, end_known=as_of)
+    """Return the price per valid_time in [start, end) as known at or before `as_of`."""
+    # TimeDB's end_known is exclusive; offset by 1µs for inclusive "as of T" semantics.
+    return _series(zone_name).read(
+        start_valid=start,
+        end_valid=end,
+        end_known=as_of + timedelta(microseconds=1),
+    )
 
 
 def get_price_revisions(zone_name: str, start: datetime, end: datetime) -> pd.DataFrame:

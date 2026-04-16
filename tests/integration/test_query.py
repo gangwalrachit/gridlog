@@ -77,8 +77,7 @@ def test_latest_returns_newest_batch(seeded):
 def test_as_of_kt1_returns_first_batch(seeded):
     from gridlog.query.prices import get_prices_as_of
 
-    cutoff = seeded["kt1"] + timedelta(microseconds=1)
-    df = get_prices_as_of(TEST_ZONE, seeded["start"], seeded["end"], cutoff)
+    df = get_prices_as_of(TEST_ZONE, seeded["start"], seeded["end"], seeded["kt1"])
 
     assert len(df) == 4
     assert list(df["value"]) == [10.0, 20.0, 30.0, 40.0]
