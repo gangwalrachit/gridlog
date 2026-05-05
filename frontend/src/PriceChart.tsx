@@ -18,12 +18,39 @@ const MONTHS_SHORT = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct
 export const ALPHA_MIN = 0.25;
 export const ALPHA_MAX = 0.93;
 
+// Returns "HH:MM\nMon D" — the \n is resolved into two SVG tspan elements
+// by splitXTicks() after Plot.plot() renders.
 function xTickFmt(d: Date): string {
-  // Show "Mon D" at UTC midnight (day boundary), "HH:MM" otherwise.
-  if (d.getUTCHours() === 0 && d.getUTCMinutes() === 0) {
-    return `${MONTHS_SHORT[d.getUTCMonth()]} ${d.getUTCDate()}`;
-  }
-  return `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}`;
+  const h = String(d.getUTCHours()).padStart(2, "0");
+  const m = String(d.getUTCMinutes()).padStart(2, "0");
+  return `${h}:${m}\n${MONTHS_SHORT[d.getUTCMonth()]} ${d.getUTCDate()}`;
+}
+
+// SVG <text> ignores \n, so split each tick label into two <tspan>s:
+// line 1 = time (full size, Steel Slate), line 2 = date (smaller, dimmer).
+function splitXTicks(plot: Element): void {
+  plot.querySelectorAll("text").forEach(el => {
+    const raw = el.textContent ?? "";
+    if (!raw.includes("\n")) return;
+    const [time, date] = raw.split("\n");
+    const x = el.getAttribute("x") ?? "0";
+    el.textContent = "";
+
+    const t1 = document.createElementNS("http://www.w3.org/2000/svg", "tspan");
+    t1.setAttribute("x", x);
+    t1.setAttribute("dy", "0");
+    t1.textContent = time;
+
+    const t2 = document.createElementNS("http://www.w3.org/2000/svg", "tspan");
+    t2.setAttribute("x", x);
+    t2.setAttribute("dy", "1.35em");
+    t2.setAttribute("font-size", "0.82em");
+    t2.style.fillOpacity = "0.55";
+    t2.textContent = date;
+
+    el.appendChild(t1);
+    el.appendChild(t2);
+  });
 }
 
 function basePlotOpts(width: number, height: number) {
@@ -31,7 +58,7 @@ function basePlotOpts(width: number, height: number) {
     width,
     height,
     marginLeft:   62,
-    marginBottom: 44,
+    marginBottom: 58,
     marginTop:    20,
     marginRight:  20,
     style: `background:transparent;color:${MUTED};font-family:${MONO};font-size:11px;--plot-background:${SURFACE}`,
@@ -96,6 +123,7 @@ function buildSingle(data: PriceRow[], width: number, height: number): Element {
   });
 
   injectGradient(plot);
+  splitXTicks(plot);
   return plot;
 }
 
@@ -136,10 +164,12 @@ function buildRevisions(data: RevisionRow[], width: number, height: number): Ele
       `${d.t.toISOString().slice(0, 16).replace("T", "  ")} UTC\n${d.v.toFixed(2)} EUR/MWh`,
   }));
 
-  return Plot.plot({
+  const plot = Plot.plot({
     ...basePlotOpts(width, height),
     marks: [...lineMarks, dotMark, tipMark],
   });
+  splitXTicks(plot);
+  return plot;
 }
 
 export function PriceChart(props: ChartProps) {
