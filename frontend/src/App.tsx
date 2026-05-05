@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { fetchLatest, fetchAsOf, fetchRevisions } from "./api";
 import type { PriceRow, RevisionRow } from "./api";
-import { PriceChart } from "./PriceChart";
+import { PriceChart, ALPHA_MIN, ALPHA_MAX } from "./PriceChart";
 
 const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 
@@ -97,7 +97,7 @@ export default function App() {
     const n = kts.length;
     return kts.map((kt, i) => ({
       kt,
-      alpha: n === 1 ? 0.93 : 0.07 + 0.86 * (i / (n - 1)),
+      alpha: n === 1 ? ALPHA_MAX : ALPHA_MIN + (ALPHA_MAX - ALPHA_MIN) * (i / (n - 1)),
       isLatest: i === n - 1,
       label: fmtKt(kt),
     }));

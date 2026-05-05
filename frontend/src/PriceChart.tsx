@@ -12,20 +12,34 @@ const SURFACE = "#101010";
 const GRID    = "#3d3a39";
 
 const MONO = "'SFMono-Regular','SF Mono',Menlo,monospace";
+const MONTHS_SHORT = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+
+// Alpha range for revision snapshots: oldest is dim but visible, latest is full.
+export const ALPHA_MIN = 0.25;
+export const ALPHA_MAX = 0.93;
+
+function xTickFmt(d: Date): string {
+  // Show "Mon D" at UTC midnight (day boundary), "HH:MM" otherwise.
+  if (d.getUTCHours() === 0 && d.getUTCMinutes() === 0) {
+    return `${MONTHS_SHORT[d.getUTCMonth()]} ${d.getUTCDate()}`;
+  }
+  return `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}`;
+}
 
 function basePlotOpts(width: number, height: number) {
   return {
     width,
     height,
     marginLeft:   62,
-    marginBottom: 40,
+    marginBottom: 44,
     marginTop:    20,
     marginRight:  20,
     style: `background:transparent;color:${MUTED};font-family:${MONO};font-size:11px;--plot-background:${SURFACE}`,
     x: {
       type:        "time" as const,
       label:       null,
-      tickFormat:  "%d %b %H:%M",
+      tickFormat:  xTickFmt,
+      ticks:       8,
       tickSize:    0,
       tickPadding: 10,
     },
@@ -95,11 +109,11 @@ function buildRevisions(data: RevisionRow[], width: number, height: number): Ele
     v:  d.value,
   }));
 
-  // One step-line per knowledge_time. Oldest = dim, newest = full emerald.
+  // One step-line per knowledge_time. Oldest = dim but visible, newest = full emerald.
   const lineMarks = kts.map((kt, i) => {
     const rows  = parsed.filter(d => d.kt === kt);
     const frac  = n === 1 ? 1 : i / (n - 1);
-    const alpha = (0.07 + 0.86 * frac).toFixed(2);
+    const alpha = (ALPHA_MIN + (ALPHA_MAX - ALPHA_MIN) * frac).toFixed(2);
 
     return Plot.lineY(rows, {
       x: "t", y: "v",
