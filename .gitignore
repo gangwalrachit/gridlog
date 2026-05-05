@@ -209,3 +209,7 @@ __marimo__/
 # gRPC generated stubs are committed alongside proto/*.proto changes —
 # rebuild with scripts/gen_proto.sh. Keep caches out though.
 gridlog/grpc_service/generated/__pycache__/
+
+# Frontend build artifacts
+frontend/node_modules/
+frontend/dist/

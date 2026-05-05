@@ -803,3 +803,74 @@ read the code or the tests.
   done.
 
 ---
+
+## Prompt 13 — Ingest Window Bug and Day-Ahead Auction Semantics
+
+**Date:** 5 May 2026
+**Tool:** Claude Code
+
+**Prompt:** Frontend was showing old hardcoded dates and revision curves were
+overlapping. Investigated why the revisions feature produced no visible diff.
+
+**What I discovered:**
+
+1. **`run_ingest.py` was fetching yesterday's delivery day, not tomorrow's.**
+   `delivery = today - timedelta(days=1)` meant every ingest captured already-
+   settled historical prices. The revision story requires fetching the
+   *freshest published* prices — tomorrow's delivery day, whose auction just
+   cleared — so that re-fetching throughout the day produces multiple snapshots
+   of prices that are still "live" from the market's perspective.
+
+2. **Day-ahead prices are final after auction; they do not revise.**
+   The Nord Pool day-ahead auction clears around 13:00 CET. Once published,
+   those 96 prices for tomorrow's delivery slots are immutable — ENTSO-E does
+   not issue corrections under normal operation. This means two fetches on the
+   same afternoon will always produce identical *values* for the same
+   `valid_time` slots. The revision story visible in the frontend is therefore
+   about *knowledge timestamps* (when GridLog captured each snapshot), not
+   about price values diverging between snapshots. True price-value revisions
+   require an intraday source, scoped as Phase 2.
+
+3. **Frontend default dates were hardcoded to April.**
+   `App.tsx` defaulted to a fixed April window that had no data in the current
+   DB. The defaults needed to be dynamic and CET-auction-aware so the UI
+   opens pre-filled to the window that actually has data.
+
+**Key decisions from this prompt:**
+
+1. **CET-aware window targeting in `run_ingest.py`.** Logic: if
+   `datetime.now(CET).hour >= 13`, target tomorrow's delivery day (auction has
+   cleared); otherwise target today's delivery day (settled at yesterday's
+   auction). Uses `ZoneInfo("Europe/Stockholm")` for DST-correct CET/CEST
+   handling. Consequence: an evening ingest and the following morning's ingest
+   both resolve to the same delivery window, producing two snapshots with
+   distinct `knowledge_time`s for the same 96 slots.
+
+2. **Dynamic frontend defaults, CET-auction-aware.** `defaultDates()` in
+   `App.tsx` now computes start/end from the same "which delivery window is
+   freshest?" logic, and sets `asOf` to `now` so the As Of field defaults to
+   the latest snapshot rather than a stale hardcoded date.
+
+3. **ARCHITECTURE.md corrected.** The Knowledge-Time Resolution section
+   described `<createdDateTime>` as the primary source — a stale reference to
+   the original Prompt 1 design that Prompt 8 had already superseded in code
+   but never updated in the doc. Corrected to reflect the actual
+   implementation: `knowledge_time = datetime.now(UTC)` at fetch start, with
+   `createdDateTime` demoted to audit metadata only.
+
+**Why the revision curves still overlap after this fix:**
+
+They will. Both ingests capture the same ENTSO-E prices (day-ahead is final).
+The frontend will show two legend entries with different knowledge timestamps
+and two visually identical curves. This is the correct behaviour for a
+time-of-knowledge system operating on settled day-ahead data. The interviewer
+story: "the architecture is correct; the data source doesn't revise. Intraday
+data would produce diverging curves — that's Phase 2."
+
+**Deferred:**
+- Intraday (XBID) source — Phase 2. Requires adding one `fetch_intraday()`
+  method to `EntsoeClient` and a new series registration; storage, query, and
+  frontend layers need no changes.
+- Scheduler to automate the twice-daily ingest cadence.
+
+---

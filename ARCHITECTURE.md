@@ -155,19 +155,35 @@ planner uses it to skip directly to the winning row for each `valid_time`.
 
 ## Knowledge-Time Resolution
 
-How we determine `knowledge_time` for each ingested row:
-
-1. **Primary:** Parse `createdDateTime` from the ENTSO-E XML document header —
-   this is the publication timestamp
-2. **Fallback:** `datetime.utcnow()` at ingest time — used when the XML field
-   is missing or unreliable
-
-The fallback is logged so we can distinguish "ENTSO-E told us when" from "we
-recorded when we saw it." Both are honest; one is more precise.
+`knowledge_time` is set to `datetime.now(UTC)` at the start of each fetch —
+the moment GridLog asked ENTSO-E for the data, not when ENTSO-E generated the
+document.
 
 ```python
-knowledge_time = doc.created_datetime or datetime.utcnow()
+knowledge_time = datetime.now(UTC)  # captured once, before the HTTP call
 ```
+
+`<createdDateTime>` from the ENTSO-E XML header is captured in `batch_params`
+for audit purposes only. It is not used as `knowledge_time` because ENTSO-E
+re-stamps it at response-generation time, not at auction-publication time —
+making it "when was this XML minted for me", not "when did the market first
+know this price." Fetch time is the honest, defensible choice. (Prompt 8
+corrected the original Prompt 1 design that planned to use `createdDateTime`.)
+
+## Ingest Window Targeting
+
+`run_ingest.py` targets the freshest published SE3 delivery day:
+
+- **After 13:00 CET** — the Nord Pool day-ahead auction has cleared; tomorrow's
+  prices are published. Target: tomorrow's delivery day.
+- **Before 13:00 CET** — the auction hasn't run yet; today's prices (settled at
+  yesterday's auction) are the freshest available. Target: today's delivery day.
+
+SE3 delivery days run **22:00 UTC → 22:00 UTC** (CET midnight → midnight,
+DST-aware via `ZoneInfo("Europe/Stockholm")`). This means two ingests on the
+same calendar day — one in the evening, one the following morning — will target
+the same delivery window and produce two snapshots with different
+`knowledge_time`s for the same 96 price slots.
 
 ---
 
