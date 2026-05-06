@@ -18,11 +18,11 @@ hindsight bias.
 | Data source    | ENTSO-E Transparency API      | Free European electricity market data                            | 1     |
 | Storage        | TimescaleDB (PostgreSQL 16)   | Single source of truth — series catalogue and hypertable values  | 1     |
 | SDK            | TimeDB (`pip install timedb`) | Open-source Python SDK wrapping TimescaleDB                      | 1     |
-| API            | FastAPI                       | Query layer → thin browser gateway (HTTP → gRPC)                 | 1→2   |
-| Data wrangling | pandas / Polars               | Normalize ENTSO-E XML → TimeDB TimeSeries                        | 1     |
+| API            | FastAPI                       | HTTP query layer — thin wrapper over query/                      | 1     |
+| Data wrangling | pandas                        | Normalize ENTSO-E XML → TimeDB TimeSeries                        | 1     |
 | Infrastructure | Docker Compose                | Local TimescaleDB                                                | 1     |
-| gRPC service   | grpcio + protobuf             | Core data service — all business logic lives here                | 2     |
-| Frontend       | Leaflet.js + D3.js            | 2D European price map with time slider                           | 2     |
+| gRPC service   | grpcio + protobuf             | gRPC query layer — thin wrapper over query/                      | 2     |
+| Frontend       | React + TypeScript (Vite)     | Intraday price chart with as-of and revision views               | 2     |
 
 ## Core Concept: Time-of-Knowledge
 
@@ -220,56 +220,56 @@ observes DST — UTC avoids that entirely.
 
 ## Dual Interface Architecture
 
-Phase 2 introduces gRPC as the core service layer. FastAPI narrows from "the
-API" to "a thin HTTP gateway for browsers."
+Phase 2 adds gRPC as a second interface alongside FastAPI. Both are independent
+thin wrappers over the same `query/` module — neither routes through the other.
 
 ### Design principles
 
-- **gRPC is the real service.** All business logic (as-of queries, latest
-  queries, input validation) lives in the gRPC service, defined by a typed
-  `.proto` contract (`prices.proto`). This is the single source of truth.
-- **FastAPI becomes a zero-logic gateway.** It translates HTTP/REST requests
-  into gRPC calls and returns the response. No query logic, no TimeDB imports,
-  no direct DB access. If FastAPI disappeared, every capability still exists
-  via gRPC.
-- **Both interfaces expose the same two queries:**
-  - `GetLatestPrices(zone, start, end)` — current best-known prices
-  - `GetPricesAsOf(zone, start, end, as_of)` — prices as known at a point in time
-- **External gRPC clients skip FastAPI entirely.** Python scripts, CLI tools,
-  or other services call the gRPC service directly — lower latency, typed
-  contract, no HTTP overhead.
+- **`query/` is the single source of truth.** All business logic (as-of queries,
+  latest queries) lives there. Neither interface contains query logic or direct
+  TimeDB imports.
+- **FastAPI and gRPC are parallel wrappers.** FastAPI translates HTTP/REST into
+  `query/` calls; the gRPC servicer translates protobuf requests into the same
+  `query/` calls. Both expose the same three operations:
+  - `GetLatest(zone, start, end)` — current best-known prices
+  - `GetAsOf(zone, start, end, as_of)` — prices as known at a point in time
+  - `GetRevisions(zone, start, end)` — full revision history per slot
+- **Browser clients use FastAPI.** REST over HTTP is the natural fit for a
+  browser frontend.
+- **External clients use gRPC directly.** Python scripts, CLI tools, or other
+  services skip FastAPI entirely — lower latency, typed contract, no HTTP
+  overhead.
 
 ### Request flow
 
 ```
-  Browser (map frontend)     gRPC client
-         │                        │
-    HTTP/REST                   gRPC
-         │                        │
-  ┌─────────────┐                 │
-  │   FastAPI   │ ← thin gateway  │
-  │  (gateway)  │   HTTP → gRPC   │
-  └──────┬──────┘                 │
-         │ gRPC                   │
-         └──────────┬─────────────┘
-                    │
-          ┌─────────────────┐
-          │  gRPC Service   │ ← ALL logic here
-          │  prices.proto   │
-          └────────┬────────┘
-                   │
-          ┌─────────────────┐
-          │    TimeDB       │
-          │   TimescaleDB   │
-          └─────────────────┘
+  Browser (React frontend)     gRPC client (scripts / services)
+         │                                │
+    HTTP/REST                           gRPC
+         │                                │
+  ┌─────────────┐                ┌────────────────┐
+  │   FastAPI   │                │  gRPC Service  │
+  │  (api/)     │                │  (grpc_service/)│
+  └──────┬──────┘                └───────┬────────┘
+         │                               │
+         └──────────────┬────────────────┘
+                        │
+                 ┌─────────────┐
+                 │   query/    │ ← ALL logic here
+                 └──────┬──────┘
+                        │
+                 ┌─────────────┐
+                 │   TimeDB    │
+                 │ TimescaleDB │
+                 └─────────────┘
 ```
 
-### Why this split?
+### Why parallel wrappers instead of FastAPI-as-gRPC-gateway?
 
-In phase 1, FastAPI talks directly to TimeDB — simple, fast to build. When
-gRPC arrives in phase 2, we move that logic into the gRPC service and FastAPI
-becomes a passthrough. This is a clean migration: the gRPC service takes over
-the query module, and FastAPI's route handlers shrink to ~3 lines each.
+Routing FastAPI through gRPC would add a serialisation round-trip and make
+FastAPI dependent on the gRPC service being up. Since `query/` already
+centralises all logic, both interfaces get the same single-source-of-truth
+guarantee without the extra network hop.
 
 ---
 
@@ -283,13 +283,12 @@ the query module, and FastAPI's route handlers shrink to ~3 lines each.
 - FastAPI with as-of and latest endpoints
 - Demo script showing the diff
 
-### Phase 2 (planned)
+### Phase 2 (complete)
 
-- gRPC service as core data layer (`prices.proto`)
-- FastAPI narrowed to thin HTTP → gRPC gateway
-- Frontend: Leaflet.js + D3.js European price map with time slider
-- Additional bidding zones
-- Intraday continuous prices (15-min resolution)
+- gRPC service as parallel interface over `query/` (`prices.proto`)
+- React + TypeScript frontend with intraday price chart, as-of view, and revision overlay
+- Additional bidding zones (future)
+- Intraday continuous prices — 15-min resolution (future)
 
 ---
 
@@ -313,19 +312,22 @@ gridlog/
 │   ├── query/                  # Read path: as_of() and latest() — pure logic
 │   │   └── prices.py
 │   ├── grpc_service/           # gRPC server (Phase 2)
-│   │   ├── server.py           # gRPC server entrypoint
-│   │   ├── servicer.py         # PriceServicer — implements prices.proto
+│   │   ├── server.py           # gRPC server + PriceServicer — implements prices.proto
 │   │   └── generated/          # Auto-generated from proto/ (gitignored)
 │   └── api/                    # FastAPI app
-│       ├── app.py              # FastAPI instance + lifespan
-│       └── routes.py           # Phase 1: calls query/ directly. Phase 2: calls gRPC
-├── frontend/                   # Leaflet.js + D3.js price map (Phase 2)
+│       └── app.py              # FastAPI instance, routes — calls query/ directly
+├── frontend/                   # React + TypeScript price chart (Phase 2)
+│   ├── src/
+│   │   ├── App.tsx             # Root component — zone/time controls
+│   │   ├── PriceChart.tsx      # Chart: latest, as-of, revision overlay
+│   │   ├── api.ts              # Typed fetch wrappers over FastAPI
+│   │   └── styles.css
 │   ├── index.html
-│   ├── map.js
-│   └── styles.css
+│   └── vite.config.ts
 ├── scripts/                    # Runnable entrypoints
 │   ├── run_ingest.py           # Trigger ingestion
-│   ├── backfill.py             # Historical backfill
+│   ├── run_api.py              # Start FastAPI server
+│   ├── run_grpc.py             # Start gRPC server
 │   └── demo_diff.py            # The money shot — as_of vs latest diff
 ├── tests/
 │   ├── unit/
@@ -341,11 +343,12 @@ gridlog/
 
 ### Key structural decisions
 
-- **`query/` is the heart.** Pure logic, no framework dependencies. Used by
-  FastAPI in phase 1, by gRPC servicer in phase 2. This module never changes
-  when we add interfaces.
-- **`grpc_service/` and `api/` are separate interface layers.** Both are thin
-  wrappers over `query/`. Neither contains business logic.
+- **`query/` is the heart.** Pure logic, no framework dependencies. Both
+  FastAPI and gRPC call it directly. This module never changes when interfaces
+  are added or swapped.
+- **`grpc_service/` and `api/` are parallel interface layers.** Both are thin
+  wrappers over `query/`. Neither contains business logic, neither routes
+  through the other.
 - **`proto/` at the repo root**, not inside the Python package — it's a
   language-neutral contract. Generated Python goes into
   `gridlog/grpc_service/generated/` (gitignored, rebuilt on `make proto`).
