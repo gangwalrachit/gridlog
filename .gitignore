@@ -213,3 +213,4 @@ gridlog/grpc_service/generated/__pycache__/
 # Frontend build artifacts
 frontend/node_modules/
 frontend/dist/
+frontend/.vite
